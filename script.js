@@ -1,30 +1,6 @@
 document.addEventListener('DOMContentLoaded', () => {
-  // ---------- Safe storage (can throw in private mode / blocked cookies) ----------
-  const store = {
-    get(key) { try { return localStorage.getItem(key); } catch { return null; } },
-    set(key, value) { try { localStorage.setItem(key, value); } catch { /* ignore */ } },
-  };
+  initHeroShader();
 
-  // ---------- Theme ----------
-  const themeToggle = document.getElementById('themeToggle');
-  const themeIcon = themeToggle?.querySelector('.theme-toggle-icon');
-  const themeText = themeToggle?.querySelector('.theme-toggle-text');
-  const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const initialTheme = store.get('mengheng-theme') || (prefersDark ? 'dark' : 'light');
-
-  function applyTheme(theme) {
-    document.body.setAttribute('data-theme', theme);
-    if (themeIcon) themeIcon.textContent = theme === 'dark' ? '☀️' : '🌙';
-    if (themeText) themeText.textContent = theme === 'dark' ? 'Light' : 'Theme';
-    store.set('mengheng-theme', theme);
-  }
-
-  applyTheme(initialTheme);
-  themeToggle?.addEventListener('click', () => {
-    applyTheme(document.body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
-  });
-
-  // ---------- Elements ----------
   const grid = document.getElementById('productGrid');
   const cards = Array.from(grid.querySelectorAll('.product-card'));
   const emptyState = document.getElementById('emptyState');
@@ -34,7 +10,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   let activeFilter = 'all';
 
-  // ---------- Out-of-stock buttons can't be clicked ----------
+  // --- Mark out-of-stock buttons so they can't be clicked ---
   grid.querySelectorAll('.download-button').forEach((btn) => {
     if (btn.textContent.toUpperCase().includes('NO IN STOCK')) {
       btn.classList.add('out-of-stock');
@@ -42,7 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ---------- Filter dropdown ----------
+  // --- Filter dropdown open/close ---
   filterButton.addEventListener('click', () => {
     const isOpen = filterMenu.classList.toggle('open');
     filterButton.setAttribute('aria-expanded', String(isOpen));
@@ -67,7 +43,7 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
-  // ---------- Search ----------
+  // --- Search ---
   searchInput.addEventListener('input', applyFilters);
 
   function applyFilters() {
@@ -77,13 +53,13 @@ document.addEventListener('DOMContentLoaded', () => {
     cards.forEach((card) => {
       const status = (card.dataset.status || '').toLowerCase();
       const category = (card.dataset.category || '').toLowerCase();
-      const filter = activeFilter.toLowerCase();
-      const matchesFilter =
-        filter === 'all' ||
-        (filter === 'free' && status === 'free') ||
-        category === filter;
+      const matchesStatus =
+        activeFilter === 'all' ||
+        (activeFilter === 'free' && status === 'free') ||
+        (activeFilter === 'sell' && status === 'sell') ||
+        category === activeFilter.toLowerCase();
       const matchesSearch = !query || (card.dataset.search || '').toLowerCase().includes(query);
-      const visible = matchesFilter && matchesSearch;
+      const visible = matchesStatus && matchesSearch;
       card.hidden = !visible;
       if (visible) visibleCount++;
     });
@@ -91,57 +67,164 @@ document.addEventListener('DOMContentLoaded', () => {
     emptyState.hidden = visibleCount !== 0;
   }
 
-  // ---------- Activity log (optional Telegram notification via /api/log) ----------
-  // Configured by <meta name="log-endpoint" content="...">. Use "off" on static hosts
-  // that have no backend, or a full https:// URL if the API lives elsewhere.
-  function logEndpoint() {
-    const configured = (document.querySelector('meta[name="log-endpoint"]')?.content || '/api/log').trim();
-    if (!configured || configured.toLowerCase() === 'off') return null;
+  // --- Downloads ---
+  // Real files use plain <a href="..." download> links and need no JS.
+  // This only handles leftover placeholder <button> cards with data-content.
+  grid.querySelectorAll('button.download-button[data-content]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const fileName = button.dataset.file || 'mengheng-download.txt';
+      const content = (button.dataset.content || '').replace(/\\n/g, '\n');
 
-    const host = location.hostname;
-    const isLocalHost = ['localhost', '127.0.0.1', '::1', '[::1]'].includes(host);
-    // Page opened straight from disk, or served by a different local dev server:
-    // talk to server.py on its default port.
-    if (location.protocol === 'file:' || (isLocalHost && location.port && location.port !== '8001')) {
-      return 'http://127.0.0.1:8001/api/log';
-    }
-    return configured;
-  }
+      const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = fileName;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
 
-  function productName(link) {
-    return link.dataset.name || link.getAttribute('download') || link.textContent.trim();
-  }
+      const originalLabel = button.innerHTML;
+      button.classList.add('done');
+      button.innerHTML = 'Downloaded <span>&#10003;</span>';
+      setTimeout(() => {
+        button.classList.remove('done');
+        button.innerHTML = originalLabel;
+      }, 1800);
+    });
+  });
 
-  function sendActivityLog(event, name) {
-    const endpoint = logEndpoint();
-    if (!endpoint) return;
-    try {
-      fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ event, product: name }),
-        keepalive: true,
-      }).catch(() => { /* logging must never break the page */ });
-    } catch { /* ignore */ }
-  }
-
-  // ---------- Downloads ----------
+  // --- Requirements / payment modal for real-file download links ---
   const specsOverlay = document.getElementById('specsOverlay');
   const specsTitle = document.getElementById('specsModalTitle');
   const specsLine = document.getElementById('specsModalSpecs');
   const specsConfirm = document.getElementById('specsConfirm');
   const specsClose = document.getElementById('specsClose');
   const specsCancel = document.getElementById('specsCancel');
-  let lastFocused = null;
+  const specsQRWrap = document.getElementById('specsQRWrap');
+  const specsQR = document.getElementById('specsQR');
+  const specsPrice = document.getElementById('specsPrice');
+  const specsStatus = document.getElementById('specsStatus');
+  let activePaymentLink = null;
 
-  function openDownloadModal(link) {
-    lastFocused = document.activeElement;
-    specsTitle.textContent = link.dataset.name || 'This item';
+  function getProductKey(link) {
+    return link.dataset.name || link.getAttribute('href') || link.textContent.trim();
+  }
+
+  function sendActivityLog(event, link) {
+    const isLocalPage = window.location.protocol === 'file:' ||
+      ['localhost', '127.0.0.1', '::1'].includes(window.location.hostname);
+    const logEndpoint = isLocalPage
+      ? 'http://127.0.0.1:8001/api/log'
+      : '/api/log';
+    fetch(logEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event,
+        product: getProductKey(link),
+        price: link.dataset.price || 'Not specified',
+      }),
+    }).then(async (response) => {
+      if (!response.ok) {
+        const details = await response.text();
+        throw new Error(`Activity log failed (${response.status}): ${details}`);
+      }
+    }).catch((error) => {
+      console.error('Could not send Telegram activity log:', error);
+    });
+  }
+
+  function closeSpecs() {
+    specsOverlay.classList.remove('open');
+  }
+
+  function cancelPayment() {
+    closeSpecs();
+  }
+
+  // Step 1: shows the "Generate QR" button. No QR yet, no timer yet.
+  function openPaymentModal(link) {
+    activePaymentLink = link;
+    sendActivityLog('buy_clicked', link);
+
+    specsTitle.textContent = link.dataset.name || 'This product';
     specsLine.textContent = (link.dataset.specs || '').replace(/\\n/g, '\n');
 
+    specsQRWrap.hidden = true;
+    specsQR.src = '';
+
+    specsPrice.textContent = link.dataset.price || 'Payment required';
+    specsStatus.textContent = 'Click below to generate your payment QR code. | ចុចខាងក្រោមដើម្បីបង្កើត QR ទូទាត់ប្រាក់';
+
+    specsConfirm.hidden = false;
+    specsConfirm.removeAttribute('aria-disabled');
+    specsConfirm.classList.remove('disabled');
+    specsConfirm.innerHTML = 'Generate QR <span>&#8595;</span>';
+    specsConfirm.href = '#';
+    specsConfirm.removeAttribute('download');
+    specsConfirm.dataset.mode = 'generate';
+    specsConfirm.dataset.productKey = getProductKey(link);
+
+    specsOverlay.classList.add('open');
+  }
+
+  function openSellModal(link) {
+    activePaymentLink = null;
+    sendActivityLog('buy_clicked', link);
+
+    specsTitle.textContent = link.dataset.name || 'This product';
+    specsLine.textContent = (link.dataset.specs || '').replace(/\\n/g, '\n');
+    specsQRWrap.hidden = true;
+    specsQR.src = '';
+    specsPrice.textContent = link.dataset.price || 'Price not specified';
+    specsStatus.textContent = 'Contact MengHeng Productions on Telegram to purchase this item.';
+
+    specsConfirm.hidden = false;
+    specsConfirm.innerHTML = 'Contact to buy <span>&#8599;</span>';
+    specsConfirm.href = 'https://t.me/MengHeng_KH';
+    specsConfirm.target = '_blank';
+    specsConfirm.rel = 'noopener noreferrer';
+    specsConfirm.removeAttribute('download');
+    specsConfirm.removeAttribute('aria-disabled');
+    specsConfirm.classList.remove('disabled');
+    specsConfirm.dataset.mode = 'contact';
+    specsConfirm.dataset.productKey = getProductKey(link);
+
+    specsOverlay.classList.add('open');
+  }
+
+  // Reveal the product's configured payment QR without claiming payment succeeded.
+  function generateQR(link) {
+    const paymentQR = link.dataset.paymentQr;
+    if (!paymentQR) {
+      specsStatus.textContent = 'Payment QR is not available for this product yet.';
+      return;
+    }
+
+    specsQR.src = paymentQR;
+    specsQR.alt = `${specsTitle.textContent} payment QR code`;
+    specsQRWrap.hidden = false;
+    specsStatus.textContent = 'Scan this KHQR code to pay. Your download will be provided after payment is confirmed.';
+    specsConfirm.hidden = true;
+    sendActivityLog('qr_generated', link);
+  }
+
+  function openFreeDownloadModal(link) {
+    specsTitle.textContent = link.dataset.name || 'This product';
+    if (link.dataset.specsList) {
+      specsLine.innerHTML = `<ul class="specs-list">${link.dataset.specsList.split('|').map((spec) => `<li>${spec}</li>`).join('')}</ul>`;
+    } else {
+      specsLine.textContent = (link.dataset.specs || '').replace(/\\n/g, '\n');
+    }
+    specsQRWrap.hidden = true;
+    specsPrice.textContent = '';
+    specsStatus.textContent = 'Ready to download';
+    specsConfirm.hidden = false;
+    specsConfirm.innerHTML = 'Download <span>&#8595;</span>';
     const destination = link.getAttribute('href');
     specsConfirm.href = destination;
-    specsConfirm.dataset.product = productName(link);
     if (/^https?:\/\//i.test(destination || '')) {
       specsConfirm.target = '_blank';
       specsConfirm.rel = 'noopener noreferrer';
@@ -149,47 +232,125 @@ document.addEventListener('DOMContentLoaded', () => {
       specsConfirm.removeAttribute('target');
       specsConfirm.removeAttribute('rel');
     }
-    const fileName = link.getAttribute('download');
-    if (fileName !== null) specsConfirm.setAttribute('download', fileName);
-    else specsConfirm.removeAttribute('download');
+    specsConfirm.setAttribute('download', link.getAttribute('download') || '');
+    specsConfirm.dataset.mode = 'download';
 
     specsOverlay.classList.add('open');
-    specsConfirm.focus();
   }
 
-  function closeModal() {
-    specsOverlay.classList.remove('open');
-    lastFocused?.focus?.();
-  }
-
-  grid.querySelectorAll('a.download-button:not(.out-of-stock)').forEach((link) => {
+  grid.querySelectorAll('a.download-button[data-specs]:not(.out-of-stock)').forEach((link) => {
     link.addEventListener('click', (e) => {
-      // External links (Drive, official libraries, ...) open directly in a new tab.
-      if (/^https?:\/\//i.test(link.getAttribute('href') || '')) {
-        sendActivityLog('link_opened', productName(link));
+      // External free links should leave the site directly in a new tab.
+      if (!link.dataset.paymentQr && link.closest('.product-card')?.dataset.status !== 'sell' &&
+          /^https?:\/\//i.test(link.href)) {
         return;
       }
-      // Files hosted on this site: show the info modal first.
-      if (link.dataset.specs) {
-        e.preventDefault();
-        openDownloadModal(link);
+
+      e.preventDefault();
+      if (link.dataset.paymentQr) {
+        openPaymentModal(link);
+      } else if (link.closest('.product-card')?.dataset.status === 'sell') {
+        openSellModal(link);
       } else {
-        sendActivityLog('download_clicked', productName(link));
+        openFreeDownloadModal(link);
       }
     });
   });
 
-  specsConfirm.addEventListener('click', () => {
-    sendActivityLog('download_clicked', specsConfirm.dataset.product || 'unknown product');
-    setTimeout(closeModal, 200);
+  specsConfirm.addEventListener('click', (e) => {
+    if (specsConfirm.dataset.mode === 'generate') {
+      e.preventDefault();
+      generateQR(activePaymentLink);
+      return;
+    }
+
+    if (specsConfirm.dataset.mode === 'contact') return;
+    setTimeout(closeSpecs, 200);
   });
 
-  specsClose.addEventListener('click', closeModal);
-  specsCancel.addEventListener('click', closeModal);
-  specsOverlay.addEventListener('click', (e) => {
-    if (e.target === specsOverlay) closeModal();
+  specsClose.addEventListener('click', () => {
+    cancelPayment();
   });
-  document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && specsOverlay.classList.contains('open')) closeModal();
+  specsCancel.addEventListener('click', cancelPayment);
+  specsOverlay.addEventListener('click', (e) => {
+    if (e.target === specsOverlay) cancelPayment();
   });
 });
+
+function initHeroShader() {
+  const canvas = document.getElementById('canvas');
+  const image = document.getElementById('sourceImage');
+  if (!canvas || !image) return;
+
+  const gl = canvas.getContext('webgl', { premultipliedAlpha: false });
+  if (!gl) return;
+
+  const vertexSource = `attribute vec2 position; varying vec2 uv; void main() { uv = position * 0.5 + 0.5; gl_Position = vec4(position, 0.0, 1.0); }`;
+  const fragmentSource = `precision mediump float;
+    uniform vec2 resolution; uniform float time; uniform vec2 mouse; uniform sampler2D image;
+    varying vec2 uv;
+    void main() {
+      vec2 centered = uv - 0.5;
+      float distanceFromMouse = length(centered - (mouse - 0.5) * 0.25);
+      float lens = smoothstep(0.75, 0.05, distanceFromMouse) * 0.035;
+      vec2 warped = uv + normalize(centered + 0.001) * lens * sin(time * 0.35);
+      float scan = sin((uv.y + time * 0.025) * 18.0) * 0.008;
+      vec4 color = texture2D(image, warped + vec2(scan, 0.0));
+      float light = 0.10 * sin(time * 0.45 + uv.x * 5.0) + 0.08 * (1.0 - distanceFromMouse);
+      gl_FragColor = vec4(color.rgb + light, 1.0);
+    }`;
+
+  function compile(type, source) {
+    const shader = gl.createShader(type);
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    return gl.getShaderParameter(shader, gl.COMPILE_STATUS) ? shader : null;
+  }
+
+  const vertex = compile(gl.VERTEX_SHADER, vertexSource);
+  const fragment = compile(gl.FRAGMENT_SHADER, fragmentSource);
+  if (!vertex || !fragment) return;
+  const program = gl.createProgram();
+  gl.attachShader(program, vertex); gl.attachShader(program, fragment); gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return;
+  gl.useProgram(program);
+
+  const buffer = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  const position = gl.getAttribLocation(program, 'position');
+  gl.enableVertexAttribArray(position); gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  const resolution = gl.getUniformLocation(program, 'resolution');
+  const time = gl.getUniformLocation(program, 'time');
+  const mouse = gl.getUniformLocation(program, 'mouse');
+  let pointer = { x: 0.5, y: 0.5 };
+  canvas.addEventListener('pointermove', (event) => {
+    const bounds = canvas.getBoundingClientRect();
+    pointer = { x: (event.clientX - bounds.left) / bounds.width, y: 1 - (event.clientY - bounds.top) / bounds.height };
+  });
+
+  function resize() {
+    const ratio = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = canvas.clientWidth * ratio; canvas.height = canvas.clientHeight * ratio;
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  window.addEventListener('resize', resize); resize();
+
+  function render(now) {
+    gl.uniform2f(resolution, canvas.width, canvas.height);
+    gl.uniform1f(time, now * 0.001); gl.uniform2f(mouse, pointer.x, pointer.y);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); requestAnimationFrame(render);
+  }
+  image.addEventListener('load', () => {
+    gl.bindTexture(gl.TEXTURE_2D, texture); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+    requestAnimationFrame(render);
+  });
+  if (image.complete) image.dispatchEvent(new Event('load'));
+}
